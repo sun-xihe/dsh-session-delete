@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Delete (dsh-session-delete)",
+    "description": "Permanently delete archived sessions from the session context menu: removes the on-disk transcript (including subagent records) and cleans up the archive set, workspace membership and the projection cache. Unarchived sessions never show the delete action."
+  }
+}

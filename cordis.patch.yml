@@ -1,0 +1,11 @@
+# dsh-session-delete bundle patch.
+#
+# One host row: the package main entry is a plain Cordis plugin that serves the
+# delete endpoint. Because package.json also declares `dsh.client`, the web app
+# loads ./client as the browser half (the context-menu action + confirm dialog).
+#
+# The entry id is globally unique and equal to the package name so the plugin
+# manager's STORE comparison can match it.
+- insert:
+    - id: dsh-session-delete
+      name: 'dsh-session-delete'
