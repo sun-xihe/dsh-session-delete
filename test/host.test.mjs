@@ -231,7 +231,7 @@ test('refuses a session that is not archived', async () => {
   }
 });
 
-test('refuses a session whose agent is still live', async () => {
+test('refuses a session whose agent is still running, even with force', async () => {
   const root = await mkdtemp(join(tmpdir(), 'dsh-session-delete-'));
   try {
     const artifact = await makeSessionDir(root, 'busy');
@@ -242,14 +242,43 @@ test('refuses a session whose agent is still live', async () => {
         snapshotOf('busy-child', childArtifact, { origin: 'subagent', parentSession: 'busy' }),
       ],
       archived: ['busy'],
-      agents: { get: (id) => (id === 'busy-child' ? { id: 'busy-child' } : undefined) },
+      agents: { get: (id) => (id === 'busy-child' ? { id: 'busy-child', status: 'running' } : undefined) },
     });
-    await assert.rejects(
-      createSessionDeleteApi(ctx).deleteSession('busy'),
-      (error) => error instanceof SessionDeleteFailure && error.code === 'session-active',
-    );
+    for (const force of [false, true]) {
+      await assert.rejects(
+        createSessionDeleteApi(ctx).deleteSession('busy', { force }),
+        (error) => error instanceof SessionDeleteFailure && error.code === 'session-active',
+      );
+    }
     assert.deepEqual(await readdir(artifact.dir), ['session.jsonl.zstd']);
     assert.deepEqual(await readdir(childArtifact.dir), ['session.jsonl.zstd']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an idle live agent needs force, then the transcript is removed', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'dsh-session-delete-'));
+  try {
+    const artifact = await makeSessionDir(root, 'held');
+    const { ctx, calls } = makeCtx({
+      snapshots: [snapshotOf('held', artifact)],
+      archived: ['held'],
+      workspaces: [{ sessionIds: ['held'] }],
+      agents: { get: (id) => (id === 'held' ? { id: 'held', status: 'idle' } : undefined) },
+    });
+    const api = createSessionDeleteApi(ctx);
+    await assert.rejects(
+      api.deleteSession('held'),
+      (error) => error instanceof SessionDeleteFailure && error.code === 'session-live',
+    );
+    assert.deepEqual(await readdir(artifact.dir), ['session.jsonl.zstd']);
+
+    const result = await api.deleteSession('held', { force: true });
+    assert.deepEqual(result.deleted, ['held']);
+    await assert.rejects(readdir(artifact.dir), { code: 'ENOENT' });
+    assert.deepEqual(calls.unarchive, ['held']);
+    assert.deepEqual(calls.detached, ['held']);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -304,21 +333,30 @@ test('route fails closed without a connection service', async () => {
   assert.equal(requestRejection(ctx, makeReq({})), 401);
 });
 
-test('route deletes an admitted POST and returns the result', async () => {
+test('route deletes an admitted POST and forwards the force flag', async () => {
   const { ctx } = makeCtx({ connection: { requestRejection: () => undefined } });
   const seen = [];
   const api = {
-    async deleteSession(sessionId) {
-      seen.push(sessionId);
+    async deleteSession(sessionId, options) {
+      seen.push({ sessionId, force: options?.force });
       return { sessionId, deleted: [sessionId], freedBytes: 42 };
     },
   };
-  const res = makeRes();
-  await handleRoute(ctx, api, makeReq({ body: { sessionId: 'root' } }), res);
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(seen, ['root']);
-  assert.deepEqual(JSON.parse(res.body), { ok: true, sessionId: 'root', deleted: ['root'], freedBytes: 42 });
-  assert.equal(res.headers['cache-control'], 'no-store');
+
+  const plain = makeRes();
+  await handleRoute(ctx, api, makeReq({ body: { sessionId: 'root' } }), plain);
+  assert.equal(plain.statusCode, 200);
+  assert.deepEqual(JSON.parse(plain.body), { ok: true, sessionId: 'root', deleted: ['root'], freedBytes: 42 });
+  assert.equal(plain.headers['cache-control'], 'no-store');
+
+  const forced = makeRes();
+  await handleRoute(ctx, api, makeReq({ body: { sessionId: 'root', force: true } }), forced);
+  assert.equal(forced.statusCode, 200);
+
+  assert.deepEqual(seen, [
+    { sessionId: 'root', force: false },
+    { sessionId: 'root', force: true },
+  ]);
 });
 
 test('route maps refusals and malformed requests to their status', async () => {

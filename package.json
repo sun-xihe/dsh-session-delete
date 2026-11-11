@@ -1,6 +1,6 @@
 {
   "name": "dsh-session-delete",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Permanently delete archived DSH sessions from the Web GUI: a trash action in the session context menu, guarded by the archive state.",
   "icon": "icon.svg",
   "keywords": [

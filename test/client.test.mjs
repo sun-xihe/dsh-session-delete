@@ -69,7 +69,15 @@ function translator(dicts) {
  * @returns the fake context plus captured registrations.
  */
 function makeClientCtx(options = {}) {
-  const captured = { menus: [], slots: [], locale: undefined, notifications: [], refreshes: 0, archived: [...(options.archived ?? [])] };
+  const captured = {
+    menus: [],
+    slots: [],
+    locale: undefined,
+    notifications: [],
+    refreshes: 0,
+    archived: [...(options.archived ?? [])],
+    sessionState: options.sessionState ?? { ids: [], byId: {} },
+  };
   const ctx = {
     archived: captured.archived,
     effect(callback) {
@@ -105,11 +113,16 @@ function makeClientCtx(options = {}) {
     workspaces: {
       list: {
         getSnapshot: () => ({ archivedSessionIds: ctx.archived }),
+        subscribe: () => () => {},
       },
     },
     sessions: {
       async refresh() {
         captured.refreshes += 1;
+      },
+      list: {
+        getSnapshot: () => captured.sessionState,
+        subscribe: () => () => {},
       },
     },
   };
@@ -136,6 +149,54 @@ async function loadClient(options = {}) {
     throw new Error('unexpected require: ' + specifier);
   };
   return { exports: registration.factory(require), registration };
+}
+
+/**
+ * Render a function component with persistent hook state, so a state update can
+ * be observed by rendering again (there is no React renderer in this test).
+ * @param Component - Component to call.
+ * @param props - Props passed to every render.
+ * @returns a render function and the captured state slots.
+ */
+function renderWithState(Component, props) {
+  const states = [];
+  const render = () => {
+    let slot = 0;
+    const original = react.useState;
+    react.useState = (initial) => {
+      const index = slot++;
+      if (!(index in states)) states[index] = initial;
+      return [
+        states[index],
+        (next) => {
+          states[index] = typeof next === 'function' ? next(states[index]) : next;
+        },
+      ];
+    };
+    try {
+      return Component(props);
+    } finally {
+      react.useState = original;
+    }
+  };
+  return { render, states };
+}
+
+/**
+ * Visit every element in a plain jsx-runtime tree.
+ * @param node - Element, children array, or primitive child.
+ * @param visit - Callback for element nodes.
+ * @returns nothing.
+ */
+function walk(node, visit) {
+  if (node === null || node === undefined || typeof node === 'boolean') return;
+  if (Array.isArray(node)) {
+    for (const child of node) walk(child, visit);
+    return;
+  }
+  if (typeof node !== 'object') return;
+  if (node.type !== undefined) visit(node);
+  if (node.props?.children !== undefined) walk(node.props.children, visit);
 }
 
 test('the client bundle registers the package id and exports a Cordis plugin', async () => {
@@ -171,6 +232,7 @@ test('the menu action is offered only for archived sessions', async () => {
   // exists for the confirmation dialog.
   assert.equal(captured.slots.some((slot) => slot.entry.name === 'contextMenu.icon' && slot.entry.key === 'session.delete'), true);
   assert.equal(captured.slots.some((slot) => slot.entry.name === 'shell.overlay'), true);
+  assert.equal(captured.slots.some((slot) => slot.entry.name === 'settings.section' && slot.entry.id === 'session-delete-archived'), true);
   assert.equal(captured.locale.namespace, 'session-delete');
 });
 
@@ -265,4 +327,91 @@ test('degrades to a plain dialog when the primitives seed is missing', async () 
   // Without the primitives the form renders the plugin's own modal stand-in.
   const fallback = formElement.type(formElement.props);
   assert.equal(fallback.props.className, 'dsh-session-delete-backdrop');
+});
+test('an idle held session asks once for a forced delete', async () => {
+  const { exports } = await loadClient();
+  const { ctx, captured } = makeClientCtx({ archived: ['held'] });
+  exports.apply(ctx);
+
+  const menu = captured.menus.find((entry) => entry.id === 'dsh-session-delete.delete');
+  menu.resolve({ sessionId: 'held', displayTitle: 'Held chat' })[0].run();
+  const overlay = captured.slots.find((slot) => slot.entry.name === 'shell.overlay');
+  const dialogElement = overlay.component({});
+  const form = renderWithState(dialogElement.type, dialogElement.props);
+
+  const requests = [];
+  let answer = () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({ ok: false, code: 'session-live', message: 'held by the harness' }),
+  });
+  globalThis.fetch = async (_url, init) => {
+    requests.push(init);
+    return answer();
+  };
+
+  let modal = form.render();
+  modal.props.footer.props.children[1].props.onClick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  modal = form.render();
+  assert.equal(modal.props.footer.props.children[1].props.children, 'Force delete');
+  const warn = modal.props.children.find((child) => child !== null && child.props?.className === 'dsh-session-delete-warn');
+  assert.ok(warn);
+
+  answer = () => ({ ok: true, status: 200, json: async () => ({ ok: true, sessionId: 'held', deleted: ['held'] }) });
+  modal.props.footer.props.children[1].props.onClick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(requests.length, 2);
+  assert.deepEqual(JSON.parse(requests[0].body), { sessionId: 'held' });
+  assert.deepEqual(JSON.parse(requests[1].body), { sessionId: 'held', force: true });
+  assert.deepEqual(captured.notifications, [{ text: 'Session deleted', success: true }]);
+  assert.equal(overlay.component({}), null);
+});
+
+test('the settings section lists blank and missing archived sessions', async () => {
+  const { exports } = await loadClient();
+  const { ctx, captured } = makeClientCtx({
+    archived: ['blank-1', 'missing-2'],
+    sessionState: {
+      ids: ['blank-1'],
+      phase: 'ready',
+      byId: {
+        'blank-1': {
+          id: 'blank-1',
+          displayTitle: '',
+          title: '',
+          blank: true,
+          running: false,
+          updatedAt: 1760000000000,
+        },
+      },
+    },
+  });
+  exports.apply(ctx);
+
+  const section = captured.slots.find((slot) => slot.entry.name === 'settings.section');
+  assert.equal(section.entry.id, 'session-delete-archived');
+  assert.equal(typeof section.entry.label, 'function');
+  assert.equal(section.entry.label(), 'Archived sessions');
+
+  const tree = section.component({});
+  const buttons = [];
+  const texts = [];
+  walk(tree, (element) => {
+    if (typeof element.props.children === 'string') texts.push(element.props.children);
+    if (element.type === Button && element.props.children === 'Delete') buttons.push(element);
+  });
+
+  assert.equal(buttons.length, 2);
+  assert.equal(texts.includes('Blank'), true);
+  assert.equal(texts.includes('Missing record'), true);
+
+  // Newest-archived first: 'missing-2' was archived after 'blank-1'.
+  buttons[0].props.onClick();
+  const overlay = captured.slots.find((slot) => slot.entry.name === 'shell.overlay');
+  const dialog = overlay.component({});
+  assert.equal(dialog.props.request.sessionId, 'missing-2');
+  assert.equal(dialog.props.request.title, 'missing-2');
 });

@@ -9,7 +9,8 @@ DSH itself only offers archive and restore — archiving hides a session from th
 ## Features
 
 - **Context-menu entry**: a danger-colored “Delete session” action in the session context menu. It appears only while the session is in the archive set; an unarchived session never shows it, and the host refuses such a request anyway.
-- **Confirmation**: a dialog explains that deletion cannot be undone. Progress is shown while it runs, and failures appear in place.
+- **Settings management page**: **Settings → Archived sessions** lists every id in the archive set, including **blank sessions** (a New Session that never produced an event) that the sidebar never renders, tagged “Blank / Missing record / Running”.
+- **Confirmation and force**: a dialog explains that deletion cannot be undone. If the session is still held by an idle Agent inside the running dsh web process, the dialog explains why and offers one explicit **Force delete**; a session that is actually running is always refused.
 - **Lineage cleanup**: deleting a session also removes the subagent transcripts it delegated to (`origin: "subagent"` descendants). Ordinary forks are independent conversations and are **not** deleted.
 - **Bookkeeping cleanup**: besides the transcript directory, the operation clears:
   - the registry-global archive set (`archivedSessionIds`);
@@ -32,7 +33,7 @@ git clone https://github.com/sun-xihe/dsh-session-delete.git
 dsh plugin --profile web add /absolute/path/to/dsh-session-delete
 # or pack first:
 npm pack ./dsh-session-delete
-dsh plugin --profile web add /absolute/path/to/dsh-session-delete-0.1.0.tgz
+dsh plugin --profile web add /absolute/path/to/dsh-session-delete-0.2.0.tgz
 ```
 
 The package declares `dsh.bundle.patch`, so `dsh plugin` appends it to the profile's `dsh.profile.bundles` layer stack automatically.
@@ -49,11 +50,25 @@ The plugin only adds one route and a few browser registrations; uninstalling tou
 
 ## Usage
 
+### Delete from the sidebar
+
 1. **Archive** the session you want to remove (context menu → Archive session, or the row's archive button).
 2. Open the sidebar view options → show archived sessions (or “archived only”) so the row is visible again.
 3. Right-click the session → **Delete session** → confirm “Delete permanently”.
 
 The row disappears after a successful deletion; in the archived-only view an empty state remains when no archived sessions are left.
+
+### Delete from Settings (blank or otherwise invisible sessions)
+
+Open **Settings → Archived sessions**. It lists every archived id directly:
+
+- A **blank session** (header only, no events) never becomes a sidebar row: blank rows exist only while selected as the current New Session, and an archived session cannot be selected. The management page is the only way to reach it.
+- A row tagged “Missing record” means the archive set still holds the id but its transcript is already gone; deleting it just cleans the bookkeeping.
+- A row tagged “Running” cannot be deleted until that session is stopped.
+
+### Force delete
+
+If the dialog says the session is “still held by the running dsh web process”, the session was opened since that process started: DSH keeps the idle Agent in memory and it holds the directory's `flock` write lease. The dialog then offers **Force delete**, which removes the on-disk transcript and bookkeeping; the in-memory copy disappears only when dsh web restarts, so refresh the page afterwards.
 
 ## What exactly gets deleted
 
@@ -73,7 +88,8 @@ The row disappears after a successful deletion; in the archived-only view an emp
 Deletion is irreversible, so the host half enforces these rules:
 
 - **Archived only**: the request re-reads the Workspace registry's archive set and refuses anything outside it (`409 not-archived`). Menu visibility is not the gate.
-- **No live work**: any target (including subagent descendants) with a live Agent is refused (`409 session-active`).
+- **Running sessions are never deleted**: any target (including subagent descendants) whose Agent is running (`status === "running"`) is refused (`409 session-active`), `force` included.
+- **Idle but held**: a session opened since this process started keeps an idle Agent and its write lock. The default answer is `409 session-live`; only an explicit second request with `force: true` removes the on-disk record, and the host logs a warning when it does.
 - **Layout check**: the only accepted location follows the JSONL backend layout — the directory holding the artifact must be named exactly after the session id and must be a real directory (not a symlink). Anything else is refused (`500 unsafe-layout`) instead of deleting a broader path.
 - **Authentication**: the route reuses DSH's `connection.requestRejection()`, i.e. the Host/Origin fence plus the signed browser-cookie check. Cross-site requests get `403`, unauthenticated requests `401`. Without a `connection` service the route **fails closed** (also 401).
 - **Request shape**: `POST` + `application/json` only, an 8 KiB body cap, and non-object JSON is rejected.
@@ -100,7 +116,7 @@ cd dsh-session-delete
 npm test        # node --test test/*.test.mjs
 ```
 
-The suites cover subagent cascading and fork preservation, the archive guard, the live-Agent guard, hostile layouts, real directory removal, workspace/archive/cache bookkeeping, route authentication and error mapping.
+The suites cover subagent cascading and fork preservation, the archive guard, the running/idle Agent guards and forced deletion, hostile layouts, real directory removal, workspace/archive/cache bookkeeping, route authentication and error mapping, plus the settings page and dialog state machine.
 
 > A `file:` install hard-links the package into the profile's `node_modules`, so source edits need a reinstall (`dsh plugin --profile web remove dsh-session-delete`, then `add` again, or edit the installed copy directly), plus another page refresh for the browser half.
 
@@ -109,6 +125,7 @@ The suites cover subagent cascading and fork preservation, the archive guard, th
 - Only the JSONL session backend (the DSH default) is supported; other backends are refused rather than guessed at.
 - A session that never materialized on disk (still pending in-process) cannot be deleted and answers `no-artifact`.
 - Derived data other than `session_projcache` is not swept; DSH's session query index is a reconcile-on-demand derived index and converges on the next search.
+- A session opened since the current dsh web process started is held by an idle Agent and its write lease; deleting it needs Force delete (or a dsh web restart). The in-memory copy does not disappear on force, so refresh the page afterwards.
 - The browser plugin needs a page refresh; the Electron desktop shell does not use the Web route, so this plugin targets the Web GUI.
 
 ## License
