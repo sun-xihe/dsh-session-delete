@@ -33,7 +33,7 @@ git clone https://github.com/sun-xihe/dsh-session-delete.git
 dsh plugin --profile web add /absolute/path/to/dsh-session-delete
 # or pack first:
 npm pack ./dsh-session-delete
-dsh plugin --profile web add /absolute/path/to/dsh-session-delete-0.2.0.tgz
+dsh plugin --profile web add /absolute/path/to/dsh-session-delete-0.2.1.tgz
 ```
 
 The package declares `dsh.bundle.patch`, so `dsh plugin` appends it to the profile's `dsh.profile.bundles` layer stack automatically.
@@ -70,6 +70,16 @@ Open **Settings → Archived sessions**. It lists every archived id directly:
 
 If the dialog says the session is “still held by the running dsh web process”, the session was opened since that process started: DSH keeps the idle Agent in memory and it holds the directory's `flock` write lease. The dialog then offers **Force delete**, which removes the on-disk transcript and bookkeeping; the in-memory copy disappears only when dsh web restarts, so refresh the page afterwards.
 
+### The transcript is gone but the row is still there
+
+A row that survives its deleted transcript belongs to a live Session in the running dsh web process: `listSessions` lists live Sessions even when their files are gone, and no public API lets a plugin remove an entry from the SessionStore — only disposing the fiber that owns it does, which in practice means restarting dsh web.
+
+The plugin never touches the archive bit in that state: it answers `409 live-only`, the dialog explains why, and the session stays archived (hidden), so a delete can no longer turn into an accidental unarchive that makes the row reappear. To clean up:
+
+1. Archive those rows again so the sidebar hides them immediately;
+2. restart `dsh web` — they disappear for good;
+3. if the archive set still holds those ids afterwards, open **Settings → Archived sessions** and delete the rows tagged “Missing record” to drop the bookkeeping ids.
+
 ## What exactly gets deleted
 
 | Data | Treatment |
@@ -90,6 +100,7 @@ Deletion is irreversible, so the host half enforces these rules:
 - **Archived only**: the request re-reads the Workspace registry's archive set and refuses anything outside it (`409 not-archived`). Menu visibility is not the gate.
 - **Running sessions are never deleted**: any target (including subagent descendants) whose Agent is running (`status === "running"`) is refused (`409 session-active`), `force` included.
 - **Idle but held**: a session opened since this process started keeps an idle Agent and its write lock. The default answer is `409 session-live`; only an explicit second request with `force: true` removes the on-disk record, and the host logs a warning when it does.
+- **Memory-only ghosts**: when the transcript is already gone but the Session is still live, the request answers `409 live-only` (`force` cannot help) and **leaves the archive set untouched** — otherwise a delete would silently turn into an unarchive.
 - **Layout check**: the only accepted location follows the JSONL backend layout — the directory holding the artifact must be named exactly after the session id and must be a real directory (not a symlink). Anything else is refused (`500 unsafe-layout`) instead of deleting a broader path.
 - **Authentication**: the route reuses DSH's `connection.requestRejection()`, i.e. the Host/Origin fence plus the signed browser-cookie check. Cross-site requests get `403`, unauthenticated requests `401`. Without a `connection` service the route **fails closed** (also 401).
 - **Request shape**: `POST` + `application/json` only, an 8 KiB body cap, and non-object JSON is rejected.
@@ -126,6 +137,7 @@ The suites cover subagent cascading and fork preservation, the archive guard, th
 - A session that never materialized on disk (still pending in-process) cannot be deleted and answers `no-artifact`.
 - Derived data other than `session_projcache` is not swept; DSH's session query index is a reconcile-on-demand derived index and converges on the next search.
 - A session opened since the current dsh web process started is held by an idle Agent and its write lease; deleting it needs Force delete (or a dsh web restart). The in-memory copy does not disappear on force, so refresh the page afterwards.
+- A deleted transcript whose Session is still live keeps its list row until dsh web restarts; the plugin can only refuse and keep it archived, not remove a live SessionStore entry.
 - The browser plugin needs a page refresh; the Electron desktop shell does not use the Web route, so this plugin targets the Web GUI.
 
 ## License

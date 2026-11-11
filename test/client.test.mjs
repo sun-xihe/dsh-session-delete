@@ -415,3 +415,32 @@ test('the settings section lists blank and missing archived sessions', async () 
   assert.equal(dialog.props.request.sessionId, 'missing-2');
   assert.equal(dialog.props.request.title, 'missing-2');
 });
+
+test('a transcript deleted while live explains the restart requirement without force', async () => {
+  const { exports } = await loadClient();
+  const { ctx, captured } = makeClientCtx({ archived: ['ghost'] });
+  exports.apply(ctx);
+
+  const menu = captured.menus.find((entry) => entry.id === 'dsh-session-delete.delete');
+  menu.resolve({ sessionId: 'ghost', displayTitle: 'Ghost' })[0].run();
+  const overlay = captured.slots.find((slot) => slot.entry.name === 'shell.overlay');
+  const dialogElement = overlay.component({});
+  const form = renderWithState(dialogElement.type, dialogElement.props);
+
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 409,
+    json: async () => ({ ok: false, code: 'live-only', message: 'restart dsh web' }),
+  });
+
+  let modal = form.render();
+  modal.props.footer.props.children[1].props.onClick();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  modal = form.render();
+  // No forced option: only a restart can drop a live-only Session.
+  assert.equal(modal.props.footer.props.children[1].props.children, 'Delete permanently');
+  const errorNode = modal.props.children.find((child) => child !== null && child.props?.role === 'alert');
+  assert.ok(errorNode);
+  assert.match(errorNode.props.children, /after dsh web restarts/);
+});

@@ -93,6 +93,7 @@ function makeCtx(options) {
     workspaceRegistry: registry,
     get(serviceName) {
       if (serviceName === 'agents') return options.agents;
+      if (serviceName === 'sessions') return options.sessions;
       if (serviceName === 'storageDomain') {
         return {
           get(domain) {
@@ -282,6 +283,39 @@ test('an idle live agent needs force, then the transcript is removed', async () 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('a transcript already gone but still live is refused without touching the archive bit', async () => {
+  const { ctx, calls } = makeCtx({
+    snapshots: [],
+    archived: ['ghost'],
+    sessions: { get: (id) => (id === 'ghost' ? { id: 'ghost' } : undefined) },
+    agents: { get: () => undefined },
+  });
+  // Force cannot help: only a dsh web restart drops a live SessionStore entry.
+  for (const force of [false, true]) {
+    await assert.rejects(
+      createSessionDeleteApi(ctx).deleteSession('ghost', { force }),
+      (error) => error instanceof SessionDeleteFailure && error.code === 'live-only',
+    );
+  }
+  assert.deepEqual(calls.unarchive, []);
+  assert.deepEqual(calls.detached, []);
+  assert.deepEqual(calls.cache, []);
+});
+
+test('a dead archived id is still cleaned up when nothing is live', async () => {
+  const { ctx, calls } = makeCtx({
+    snapshots: [],
+    archived: ['dead'],
+    workspaces: [{ sessionIds: ['dead'] }],
+    agents: { get: () => undefined },
+  });
+  const result = await createSessionDeleteApi(ctx).deleteSession('dead');
+  assert.deepEqual(result.deleted, []);
+  assert.deepEqual(calls.unarchive, ['dead']);
+  assert.deepEqual(calls.detached, ['dead']);
+  assert.deepEqual(calls.cache, ['dead']);
 });
 
 test('refuses a hostile artifact layout', async () => {

@@ -33,7 +33,7 @@ git clone https://github.com/sun-xihe/dsh-session-delete.git
 dsh plugin --profile web add /绝对路径/dsh-session-delete
 # 或先从源码打包：
 npm pack ./dsh-session-delete
-dsh plugin --profile web add /绝对路径/dsh-session-delete-0.2.0.tgz
+dsh plugin --profile web add /绝对路径/dsh-session-delete-0.2.1.tgz
 ```
 
 该包声明了 `dsh.bundle.patch`，`dsh plugin` 会把它自动追加到 profile 的 `dsh.profile.bundles` 层栈里。
@@ -70,6 +70,16 @@ dsh plugin --profile web remove dsh-session-delete
 
 如果确认框提示"仍被当前 dsh web 进程持有"，说明该会话自本次进程启动后被打开过：DSH 会把空闲 Agent 一直留在内存里，并持有日志目录的 `flock` 写锁。此时确认框会再给一次**强制删除**：移除磁盘上的日志与簿记，内存里的旧会话要重启 dsh web 才消失。建议强制删除后刷新页面。
 
+### 删除后列表里还在？
+
+如果某个会话的磁盘记录已经删除、但列表里仍然出现，说明它的 Session 还活在当前 dsh web 进程内存里。DSH 的 `listSessions` 会把 live Session 也列出来（即使日志文件已经不存在），而插件没有任何公开 API 能把它从 SessionStore 摘掉——只有持有它的 fiber 被销毁时才会移除，通常就是重启 dsh web。
+
+这种情况插件**不会**再动归档状态：请求直接返回 `409 live-only`，确认框说明原因，并保持归档位不变，避免出现"点删除反而取消归档、会话重新冒出来"的现象。想立刻清理：
+
+1. 把这几行重新归档，先让它们从侧栏隐藏；
+2. 下次重启 `dsh web` 后它们会彻底消失；
+3. 重启后如果归档集合里还残留这些 id，到 设置 → 归档会话 里，标「记录缺失」的条目点删除即可清掉簿记（没有日志可删，只清 id）。
+
 ## 删除到底删了什么
 
 | 数据 | 处理 |
@@ -90,6 +100,7 @@ dsh plugin --profile web remove dsh-session-delete
 - **只删已归档**：请求到达时重新读取工作区注册表的归档集合，不在集合里就拒绝（`409 not-archived`）。菜单是否显示不影响这条规则。
 - **运行中的会话一票否决**：任一待删会话（含子智能体后代）的 Agent 还在跑（`status === "running"`）时拒绝（`409 session-active`），`force` 也不能绕过。
 - **空闲但仍被持有**：会话自本次进程启动后被打开过时，DSH 会把空闲 Agent 留在内存并持有写锁；默认拒绝（`409 session-live`），只有第二次明确的 `force: true` 才删除磁盘记录，并在日志里留一条警告。
+- **只剩内存的幽灵**：磁盘记录已不存在但 Session 仍 live 时拒绝（`409 live-only`，`force` 无效），并且**不改归档集合**——否则就会变成"点删除反而取消归档"。
 - **路径校验**：只接受与 JSONL 后端布局一致的定位——日志文件所在目录必须恰好以会话 id 命名，且必须是真实目录（不是符号链接）。不匹配就拒绝（`500 unsafe-layout`），不会递归删除更大的路径。
 - **鉴权**：HTTP 路由复用 DSH 的 `connection.requestRejection()`，即 Host/Origin 栅栏 + 签名浏览器 Cookie 校验；跨站请求被 `403` 拒绝，未登录请求被 `401` 拒绝。缺少 `connection` 服务时**失败关闭**（也返回 401）。
 - **请求约束**：只接受 `POST` + `application/json`，请求体上限 8 KiB，并拒绝非对象 JSON。
@@ -125,6 +136,7 @@ npm test        # node --test test/*.test.mjs
 - 只支持 JSONL 会话后端（DSH 默认后端）；其它持久化后端会被拒绝，而不是猜测删除方式。
 - 会话从未落盘（进程内 pending）时无法删除，返回 `no-artifact`。
 - 自本次 dsh web 启动后被打开过的会话会一直被空闲 Agent 持有写锁；删除这类会话需要「强制删除」（或先重启 dsh web）。强制删除后内存里的旧会话不会自动消失，建议刷新页面。
+- 日志已删除但 Session 仍 live 时，列表里会残留这一行直到重启 dsh web；插件只能拒绝并保持归档状态，不能从 SessionStore 摘除 live Session。
 - 删除不清理 `session_projcache` 之外的其它派生数据；DSH 的会话查询索引是按需对账的派生索引，会在下次检索时自行收敛。
 - 浏览器插件需要刷新页面才生效；桌面 Electron 壳体不走 Web 路由，本插件面向 Web GUI。
 
